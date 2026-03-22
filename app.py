@@ -15,6 +15,7 @@ LOADING_POINTS = [
     "Phase-1 RM",
     "Phase-2 RM",
     "Phase-2 Middle",
+    "Single Crane"
 ]
 
 SHIFT_OPTIONS = ["A", "B", "C"]
