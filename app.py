@@ -146,7 +146,7 @@ def check_records_access():
 
     password = st.text_input("Password", type="password", key="records_password_input")
     if st.button("Login", use_container_width=True):
-        app_password = st.secrets.get("records_password", "12345")
+        app_password = st.secrets.get("records_password", "Aarav")
         if password == app_password:
             st.session_state.records_auth = True
             st.success("Access granted.")
