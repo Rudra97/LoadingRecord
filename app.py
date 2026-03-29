@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, date
 from io import BytesIO
 
@@ -15,48 +16,51 @@ LOADING_POINTS = [
     "Phase-1 RM",
     "Phase-2 RM",
     "Phase-2 Middle",
-    "Single Crane"
+    "Single Crane",
 ]
 
 SHIFT_OPTIONS = ["A", "B", "C"]
+HOUR_OPTIONS = [f"{i:02d}" for i in range(24)]
+MINUTE_OPTIONS = [f"{i:02d}" for i in range(60)]
 
 
 def get_connection():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    return conn
 
 
 def create_table():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS loading_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            vehicle_no TEXT NOT NULL,
-            record_date TEXT NOT NULL,
-            loading_point TEXT NOT NULL,
-            shift TEXT NOT NULL,
-            loading_start_time TEXT NOT NULL,
-            loading_end_time TEXT NOT NULL,
-            remarks TEXT,
-            created_at TEXT NOT NULL
+    with closing(get_connection()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS loading_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vehicle_no TEXT NOT NULL,
+                record_date TEXT NOT NULL,
+                loading_point TEXT NOT NULL,
+                shift TEXT NOT NULL,
+                loading_start_time TEXT NOT NULL,
+                loading_end_time TEXT NOT NULL,
+                remarks TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def delete_old_records():
     cutoff = datetime.now() - timedelta(days=2)
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "DELETE FROM loading_records WHERE created_at < ?",
-        (cutoff.isoformat(),)
-    )
-    conn.commit()
-    conn.close()
+    with closing(get_connection()) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM loading_records WHERE created_at < ?",
+            (cutoff.isoformat(timespec="seconds"),),
+        )
+        conn.commit()
 
 
 def insert_record(
@@ -68,51 +72,53 @@ def insert_record(
     loading_end_time,
     remarks,
 ):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO loading_records (
-            vehicle_no, record_date, loading_point, shift,
-            loading_start_time, loading_end_time, remarks, created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            vehicle_no,
-            str(record_date),
-            loading_point,
-            shift,
-            loading_start_time,
-            loading_end_time,
-            remarks,
-            datetime.now().isoformat(),
-        ),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        with closing(get_connection()) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO loading_records (
+                    vehicle_no, record_date, loading_point, shift,
+                    loading_start_time, loading_end_time, remarks, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    vehicle_no,
+                    str(record_date),
+                    loading_point,
+                    shift,
+                    loading_start_time,
+                    loading_end_time,
+                    remarks,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+        return True, "Saved successfully."
+    except sqlite3.Error as e:
+        return False, f"Database error: {e}"
 
 
 def get_all_records():
-    conn = get_connection()
-    df = pd.read_sql_query(
-        """
-        SELECT
-            id,
-            vehicle_no AS "Vehicle No",
-            record_date AS "Date",
-            loading_point AS "Loading Point",
-            shift AS "Shift",
-            loading_start_time AS "Loading Start Time",
-            loading_end_time AS "Loading End Time",
-            remarks AS "Remarks",
-            created_at AS "Created At"
-        FROM loading_records
-        ORDER BY created_at DESC
-        """,
-        conn,
-    )
-    conn.close()
+    with closing(get_connection()) as conn:
+        df = pd.read_sql_query(
+            """
+            SELECT
+                id,
+                vehicle_no AS "Vehicle No",
+                record_date AS "Date",
+                loading_point AS "Loading Point",
+                shift AS "Shift",
+                loading_start_time AS "Loading Start Time",
+                loading_end_time AS "Loading End Time",
+                remarks AS "Remarks",
+                created_at AS "Created At"
+            FROM loading_records
+            ORDER BY id DESC
+            """,
+            conn,
+        )
     return df
 
 
@@ -146,7 +152,7 @@ def check_records_access():
 
     password = st.text_input("Password", type="password", key="records_password_input")
     if st.button("Login", use_container_width=True):
-        app_password = st.secrets.get("records_password", "Aarav")
+        app_password = st.secrets["records_password"] if "records_password" in st.secrets else "Aarav"
         if password == app_password:
             st.session_state.records_auth = True
             st.success("Access granted.")
@@ -317,15 +323,38 @@ def add_custom_css():
     )
 
 
+def time_dropdown(label, key_prefix, default_hour="08", default_minute="00"):
+    st.markdown(f"**{label}**")
+    c1, c2 = st.columns(2)
+    with c1:
+        hour = st.selectbox(
+            "Hour",
+            HOUR_OPTIONS,
+            index=HOUR_OPTIONS.index(default_hour),
+            key=f"{key_prefix}_hour",
+        )
+    with c2:
+        minute = st.selectbox(
+            "Minute",
+            MINUTE_OPTIONS,
+            index=MINUTE_OPTIONS.index(default_minute),
+            key=f"{key_prefix}_minute",
+        )
+    return f"{hour}:{minute}"
+
+
 st.set_page_config(
     page_title="Loading Records App",
     page_icon="🚚",
-    layout="wide"
+    layout="wide",
 )
 
 create_table()
 delete_old_records()
 add_custom_css()
+
+if "save_message" not in st.session_state:
+    st.session_state.save_message = ""
 
 all_df = get_all_records()
 active_count = len(all_df)
@@ -338,6 +367,10 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if st.session_state.save_message:
+    st.success(st.session_state.save_message)
+    st.session_state.save_message = ""
 
 m1, m2, m3 = st.columns(3)
 with m1:
@@ -399,19 +432,23 @@ with tab1:
 
         c5, c6 = st.columns(2)
         with c5:
-            loading_start_time = st.text_input(
+            loading_start_time = time_dropdown(
                 "Loading Start Time",
-                placeholder="Enter time like 08:15"
+                "loading_start_time",
+                default_hour="08",
+                default_minute="00",
             )
         with c6:
-            loading_end_time = st.text_input(
+            loading_end_time = time_dropdown(
                 "Loading End Time",
-                placeholder="Enter time like 10:45"
+                "loading_end_time",
+                default_hour="09",
+                default_minute="00",
             )
 
         remarks = st.text_area(
             "Remarks / Other Data",
-            placeholder="Enter notes or additional details"
+            placeholder="Enter notes or additional details",
         )
 
         save_clicked = st.form_submit_button("Save Record", use_container_width=True)
@@ -419,15 +456,9 @@ with tab1:
         if save_clicked:
             vehicle_no = vehicle_no.strip()
             remarks = remarks.strip()
-            loading_start_time = loading_start_time.strip()
-            loading_end_time = loading_end_time.strip()
 
             if not vehicle_no:
                 st.error("Vehicle No is required.")
-            elif not loading_start_time:
-                st.error("Loading Start Time is required.")
-            elif not loading_end_time:
-                st.error("Loading End Time is required.")
             else:
                 try:
                     start_obj = datetime.strptime(loading_start_time, "%H:%M")
@@ -436,7 +467,7 @@ with tab1:
                     if end_obj < start_obj:
                         st.error("Loading End Time cannot be earlier than Loading Start Time.")
                     else:
-                        insert_record(
+                        ok, message = insert_record(
                             vehicle_no=vehicle_no,
                             record_date=record_date,
                             loading_point=loading_point,
@@ -445,11 +476,14 @@ with tab1:
                             loading_end_time=loading_end_time,
                             remarks=remarks,
                         )
-                        st.success("Record saved successfully.")
-                        st.rerun()
+                        if ok:
+                            st.session_state.save_message = message
+                            st.rerun()
+                        else:
+                            st.error(message)
 
                 except ValueError:
-                    st.error("Please enter time in HH:MM format, for example 08:15 or 17:30.")
+                    st.error("Invalid time selected.")
 
 with tab2:
     st.markdown(
@@ -482,23 +516,21 @@ with tab2:
             if search_vehicle.strip():
                 q = search_vehicle.strip().lower()
                 filtered_df = filtered_df[
-                    filtered_df["Vehicle No"].astype(str).str.lower().str.contains(q)
+                    filtered_df["Vehicle No"].astype(str).str.lower().str.contains(q, na=False)
                 ]
 
             if filter_point != "All":
-                filtered_df = filtered_df[
-                    filtered_df["Loading Point"] == filter_point
-                ]
+                filtered_df = filtered_df[filtered_df["Loading Point"] == filter_point]
 
             if filter_shift != "All":
-                filtered_df = filtered_df[
-                    filtered_df["Shift"] == filter_shift
-                ]
+                filtered_df = filtered_df[filtered_df["Shift"] == filter_shift]
+
+            st.caption(f"Showing {len(filtered_df)} active record(s).")
 
             st.dataframe(
                 filtered_df.drop(columns=["id"]),
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
             )
 
             st.markdown(
